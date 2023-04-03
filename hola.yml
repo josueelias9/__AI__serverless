@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Serverless machine learning.
+Resources:
+  primer:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Role: arn:aws:iam::620423771455:role/josue-role
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+
+          import boto3
+          import json
+
+          print('Loading function')
+
+
+          def handler(event, context):
+              '''Provide an event that contains the following keys:
+
+                - operation: one of the operations in the operations dict below
+                - tableName: required for operations that interact with DynamoDB
+                - payload: a parameter to pass to the operation being performed
+              '''
+              #print("Received event: " + json.dumps(event, indent=2))
+
+              operation = event['operation']
+
+              if 'tableName' in event:
+                  dynamo = boto3.resource('dynamodb').Table(event['tableName'])
+
+              operations = {
+                  'create': lambda x: dynamo.put_item(**x),
+                  'read': lambda x: dynamo.get_item(**x),
+                  'update': lambda x: dynamo.update_item(**x),
+                  'delete': lambda x: dynamo.delete_item(**x),
+                  'list': lambda x: dynamo.scan(**x),
+                  'echo': lambda x: x,
+                  'ping': lambda x: 'pong'
+              }
+
+              if operation in operations:
+                  return operations[operation](event.get('payload'))
+              else:
+                  raise ValueError('Unrecognized operation "{}"'.format(operation))
+
+      Description: Invoke a function during stack creation.
+      TracingConfig:
+        Mode: Active
+
+
+
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: My API Gateway and Lambda function
+
+Parameters:
+  apiGatewayName:
+    Type: String
+    Default: my-api
+  apiGatewayStageName:
+    Type: String
+    AllowedPattern: "[a-z0-9]+"
+    Default: call
+  apiGatewayHTTPMethod:
+    Type: String
+    Default: POST
+  lambdaFunctionName:
+    Type: String
+    AllowedPattern: "[a-zA-Z0-9]+[a-zA-Z0-9-]+[a-zA-Z0-9]+"
+    Default: my-function
+
+Resources:
+  apiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: Example API Gateway
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Name: !Ref apiGatewayName
+
+  apiGatewayRootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: !Ref apiGatewayHTTPMethod
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations
+          - lambdaArn: !GetAtt lambdaFunction.Arn
+      ResourceId: !GetAtt apiGateway.RootResourceId
+      RestApiId: !Ref apiGateway
+
+  apiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - apiGatewayRootMethod
+    Properties:
+      RestApiId: !Ref apiGateway
+      StageName: !Ref apiGatewayStageName
+
+  lambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+
+          import boto3
+          import json
+
+          print('Loading function')
+
+
+          def handler(event, context):
+              '''Provide an event that contains the following keys:
+
+                - operation: one of the operations in the operations dict below
+                - tableName: required for operations that interact with DynamoDB
+                - payload: a parameter to pass to the operation being performed
+              '''
+              #print("Received event: " + json.dumps(event, indent=2))
+
+              operation = event['operation']
+
+              if 'tableName' in event:
+                  dynamo = boto3.resource('dynamodb').Table(event['tableName'])
+
+              operations = {
+                  'create': lambda x: dynamo.put_item(**x),
+                  'read': lambda x: dynamo.get_item(**x),
+                  'update': lambda x: dynamo.update_item(**x),
+                  'delete': lambda x: dynamo.delete_item(**x),
+                  'list': lambda x: dynamo.scan(**x),
+                  'echo': lambda x: x,
+                  'ping': lambda x: 'pong'
+              }
+
+              if operation in operations:
+                  return operations[operation](event.get('payload'))
+              else:
+                  raise ValueError('Unrecognized operation "{}"'.format(operation))
+
+      Description: Example Lambda function
+      FunctionName: !Ref lambdaFunctionName
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt lambdaIAMRole.Arn
+      Runtime: python3.8
+
+  lambdaApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt lambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      # note: if route *not* at API Gateway root, `SourceArn` would take the form of:
+      #               arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/${apiGatewayStageName}/${apiGatewayHTTPMethod}/PATH_PART
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/${apiGatewayStageName}/${apiGatewayHTTPMethod}/
+
+  lambdaIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${lambdaFunctionName}:*
+          PolicyName: lambda
+
+  lambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${lambdaFunctionName}
+      RetentionInDays: 90
+
+Outputs:
+  apiGatewayInvokeURL:
+    Value: !Sub https://${apiGateway}.execute-api.${AWS::Region}.amazonaws.com/${apiGatewayStageName}
+
+  lambdaArn:
+    Value: !GetAtt lambdaFunction.Arn
